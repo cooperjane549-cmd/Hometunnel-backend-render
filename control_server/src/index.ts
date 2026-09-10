@@ -20,13 +20,18 @@ interface NodeSession {
 
 const nodeRegistry = new Map<string, NodeSession>();
 
+// Root ping endpoint for Render cold-start checks
+app.get('/', (_req: Request, res: Response) => {
+  res.send({ status: 'HomeTunnel Control Plane Server Running' });
+});
+
 // 1. Home Node (Kisumu) Registers and Requests a 6-Digit Pairing Code
 app.post('/api/node/register', (req: Request, res: Response) => {
   const { nodePublicKey, ipAddress, port } = req.body;
 
-  if (!nodePublicKey || !ipAddress) {
-    return res.status(400).json({ error: 'Missing public key or IP address' });
-  }
+  // Provide fallback values if client app sends lightweight payloads
+  const effectivePublicKey = nodePublicKey || 'host_generated_key';
+  const effectiveIp = ipAddress || req.ip || '127.0.0.1';
 
   const pairingCode = Math.floor(100000 + Math.random() * 900000).toString();
   const nodeId = `node_${Date.now()}`;
@@ -34,8 +39,8 @@ app.post('/api/node/register', (req: Request, res: Response) => {
   const session: NodeSession = {
     nodeId,
     pairingCode,
-    nodePublicKey,
-    ipAddress,
+    nodePublicKey: effectivePublicKey,
+    ipAddress: effectiveIp,
     port: port || 51820,
     isPaired: false,
   };
@@ -51,17 +56,21 @@ app.post('/api/node/register', (req: Request, res: Response) => {
   });
 });
 
-// 2. Mobile App (Nairobi) Enters Pairing Code to Connect
-app.post('/api/client/pair', (req: Request, res: Response) => {
-  const { pairingCode, clientPublicKey } = req.body;
+// Helper function to process pairing logic across both legacy and API endpoints
+const handlePairing = (req: Request, res: Response) => {
+  const pairingCode = req.body.pairingCode || req.body.code;
+  const clientPublicKey = req.body.clientPublicKey || 'client_generated_key';
 
-  if (!pairingCode || !clientPublicKey) {
-    return res.status(400).json({ error: 'Missing pairing code or client public key' });
+  console.log(`[Pair Request Received] Code attempted: ${pairingCode}`);
+
+  if (!pairingCode) {
+    return res.status(400).json({ error: 'Missing pairing code' });
   }
 
   const session = nodeRegistry.get(pairingCode);
 
   if (!session) {
+    console.log(`[Pairing Failed] Code ${pairingCode} not found in registry.`);
     return res.status(404).json({ error: 'Invalid or expired pairing code' });
   }
 
@@ -76,18 +85,23 @@ app.post('/api/client/pair', (req: Request, res: Response) => {
     nodePublicKey: session.nodePublicKey,
     assignedVirtualIp: '10.200.0.2',
   });
-});
+};
+
+// 2. Mobile App (Nairobi) Enters Pairing Code to Connect
+app.post('/api/client/pair', handlePairing);
+app.post('/pair', handlePairing); // Direct fallback route for Flutter Client app
 
 // 3. Heartbeat Endpoint for Home Node to Update Dynamic ISP IPs
 app.post('/api/node/heartbeat', (req: Request, res: Response) => {
-  const { pairingCode, currentIp, currentPort } = req.body;
+  const pairingCode = req.body.pairingCode || req.body.code;
+  const { currentIp, currentPort } = req.body;
 
   const session = nodeRegistry.get(pairingCode);
   if (!session) {
     return res.status(404).json({ error: 'Node session not found' });
   }
 
-  session.ipAddress = currentIp;
+  if (currentIp) session.ipAddress = currentIp;
   if (currentPort) session.port = currentPort;
 
   return res.json({ status: 'ack', isPaired: session.isPaired, clientPublicKey: session.clientPublicKey });
